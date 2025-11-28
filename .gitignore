@@ -1,0 +1,11 @@
+node_modules
+.dist
+coverage
+dist
+.env
+.env.local
+.sqlite
+.tmp
+auth_private.key
+auth_public.key
+var/logs
