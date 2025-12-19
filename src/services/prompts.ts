@@ -192,7 +192,7 @@ export async function buildCorrectionSystemPrompt(): Promise<string> {
 
 export async function buildCorrectionUserPrompt(
   exercises: Array<{
-    id: number;
+    id: string;
     type: string;
     question: string;
     correct_answer: string;
@@ -220,7 +220,7 @@ export async function buildCorrectionUserPrompt(
 
 export function getCorrectionPrompt(
   exercises: Array<{
-    id: number;
+    id: string;
     type: string;
     question: string;
     correct_answer: string;

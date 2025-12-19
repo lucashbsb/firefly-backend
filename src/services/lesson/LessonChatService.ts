@@ -1,10 +1,6 @@
 import { aiService } from '../AIService';
-import { 
-  lessonRepository, 
-  exerciseRepository, 
-  answerRepository,
-  lessonChatRepository
-} from '../../repositories';
+import { lessonRepository } from '../../repositories';
+import { LessonChatMessage } from '../../models/entities';
 
 export class LessonChatService {
   async startChat(userId: string): Promise<{ message: string; question_number: number }> {
@@ -17,20 +13,24 @@ export class LessonChatService {
       throw new Error(`Cannot start chat in status: ${lesson.status}. Complete correction first.`);
     }
 
-    const existingMessages = await lessonChatRepository.findByLesson(lesson.id);
+    const existingMessages = lesson.chat_messages || [];
     
     if (existingMessages.length > 0) {
-      const lastAssistant = await lessonChatRepository.getLastAssistantQuestion(lesson.id);
+      const lastAssistant = existingMessages
+        .filter(m => m.role === 'assistant')
+        .pop();
+      
       if (lastAssistant) {
+        const questionNumber = existingMessages.filter(m => m.role === 'assistant').length;
         return {
           message: lastAssistant.content,
-          question_number: lastAssistant.question_number || 1
+          question_number: questionNumber
         };
       }
     }
 
-    const exercises = await exerciseRepository.findByLessonId(lesson.id);
-    const userAnswers = await answerRepository.findByUserAndExerciseIds(userId, exercises.map(e => e.id));
+    const exercises = lesson.exercises_data || [];
+    const corrections = lesson.corrections?.corrections || [];
 
     const chatResponse = await aiService.generateChatQuestions({
       user_id: userId,
@@ -38,26 +38,24 @@ export class LessonChatService {
       lesson_topic: lesson.topic,
       lesson_theory: lesson.theory || '',
       exercises_summary: exercises.map((ex) => {
-        const answer = userAnswers.find(a => a.exercise_id === ex.id);
+        const correction = corrections.find(c => c.exercise_id === ex.id);
         return {
           question: ex.question,
-          user_answer: answer?.answer || '',
+          user_answer: ex.user_answer || '',
           correct_answer: ex.correct_answer || '',
-          is_correct: answer?.is_correct || false
+          is_correct: correction?.is_correct || false
         };
       }),
       question_number: 1
     });
 
-    await lessonChatRepository.addMessage({
-      lesson_id: lesson.id,
-      user_id: userId,
+    const newMessage: LessonChatMessage = {
       role: 'assistant',
       content: chatResponse.message,
-      question_number: 1,
-      is_user_response: false
-    });
+      created_at: new Date().toISOString()
+    };
 
+    await lessonRepository.addChatMessage(lesson.id, newMessage);
     await lessonRepository.updateStatus(lesson.id, 'chat_in_progress');
 
     return {
@@ -84,13 +82,13 @@ export class LessonChatService {
       throw new Error(`Cannot answer chat in status: ${lesson.status}.`);
     }
 
-    await lessonChatRepository.addMessage({
-      lesson_id: lesson.id,
-      user_id: userId,
+    const userMessage: LessonChatMessage = {
       role: 'user',
       content: message,
-      is_user_response: true
-    });
+      created_at: new Date().toISOString()
+    };
+
+    await lessonRepository.addChatMessage(lesson.id, userMessage);
 
     const { answered } = await lessonRepository.incrementChatQuestionsAnswered(lesson.id);
     const progress = await lessonRepository.getProgress(lesson.id);
@@ -101,14 +99,15 @@ export class LessonChatService {
       const report = await generateReportFn(userId);
       
       return {
-        response: `Great conversation! Your lesson is now complete. Here's a summary: You scored ${report.performance_score}% overall.`,
+        response: `Great conversation! Your lesson is now complete. Your score: ${report.performance_score}%.`,
         question_number: answered,
         is_complete: true
       };
     }
 
     const nextQuestionNumber = answered + 1;
-    const chatHistory = await lessonChatRepository.findByLesson(lesson.id);
+    const updatedLesson = await lessonRepository.findActiveByUser(userId);
+    const chatHistory = updatedLesson?.chat_messages || [];
     
     const chatResponse = await aiService.generateChatQuestions({
       user_id: userId,
@@ -120,14 +119,13 @@ export class LessonChatService {
       previous_messages: chatHistory.map(m => ({ role: m.role, content: m.content }))
     });
 
-    await lessonChatRepository.addMessage({
-      lesson_id: lesson.id,
-      user_id: userId,
+    const assistantMessage: LessonChatMessage = {
       role: 'assistant',
       content: chatResponse.message,
-      question_number: nextQuestionNumber,
-      is_user_response: false
-    });
+      created_at: new Date().toISOString()
+    };
+
+    await lessonRepository.addChatMessage(lesson.id, assistantMessage);
 
     return {
       response: chatResponse.message,

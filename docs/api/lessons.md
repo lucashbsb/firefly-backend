@@ -4,6 +4,80 @@ Base path: `/api/lessons`
 
 ---
 
+## GET `/:id` 🔒
+
+Get complete lesson data by ID (same format as `/session`).
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "32fbaf91-bb19-429a-8cce-ba0e5bb53ffc",
+    "day": 2,
+    "phase": 0,
+    "level": "A2",
+    "topic": "present_simple",
+    "theory": "## Present Simple (A2 Review)...",
+    "grammar_focus": ["present_simple"],
+    "vocabulary_focus": ["daily routines", "work and study", "home and family"],
+    "status": "created",
+    "progress": {
+      "exercises_answered": 0,
+      "exercises_total": 30,
+      "chat_questions_answered": 0,
+      "chat_questions_total": 3
+    },
+    "exercises": [
+      {
+        "id": "7d9b6597-acb3-4d1a-8587-4d5ec8385994",
+        "hint": "Use the base verb with I/you/we/they.",
+        "type": "fill-blank",
+        "options": null,
+        "question": "I ____ (work) in a small office.",
+        "difficulty": 1,
+        "skill_tags": ["present_simple_form"],
+        "explanation": "With 'I', the present simple affirmative uses the base form: 'I work'.",
+        "user_answer": null,
+        "correct_answer": "work"
+      }
+    ],
+    "corrections": null,
+    "chat_messages": [],
+    "report": null,
+    "workflow": {
+      "lesson_id": "32fbaf91-bb19-429a-8cce-ba0e5bb53ffc",
+      "day": 2,
+      "status": "created",
+      "exercises": {
+        "total": 30,
+        "answered": 0,
+        "remaining": 30
+      },
+      "chat": {
+        "total": 3,
+        "answered": 0,
+        "remaining": 3
+      },
+      "can_proceed": true,
+      "next_action": "answer_exercises"
+    }
+  }
+}
+```
+
+**Response:** `404 Not Found`
+
+```json
+{
+  "success": false,
+  "error": "Lesson not found"
+}
+```
+
+---
+
 ## GET `/user/:userId/workflow` 🔒
 
 Get current lesson workflow state.
@@ -29,6 +103,100 @@ Get current lesson workflow state.
     },
     "can_proceed": true,
     "next_action": "answer_exercises"
+  }
+}
+```
+
+---
+
+## GET `/user/:userId/active` 🔒
+
+Get active (incomplete) lesson.
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "data": {
+    "day": 15,
+    "topic": "Present Simple",
+    "phase": 2,
+    "level": "B1",
+    "theory": "...",
+    "exercises": [...]
+  }
+}
+```
+
+**Response:** `404 Not Found`
+
+```json
+{
+  "success": false,
+  "error": "No active lesson found"
+}
+```
+
+---
+
+## GET `/user/:userId/history?page=1&limit=20` 🔒
+
+Get paginated lesson history with reports or lesson data.
+
+**Query Parameters:**
+
+- `page` (optional): Page number. Default: 1
+- `limit` (optional): Items per page. Default: 20
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "day": 15,
+      "topic": "Present Simple",
+      "status": "completed",
+      "completed": true,
+      "report": {
+        "performance_score": 85,
+        "accuracy_rate": 80,
+        "exercises_correct": 24,
+        "exercises_total": 30,
+        "strengths": ["present_simple", "verb_to_be"],
+        "weaknesses": ["past_simple"],
+        "perceived_level": {
+          "grammar": "B1",
+          "vocabulary": "A2",
+          "overall": "B1"
+        },
+        "next_day_focus": ["past_simple", "irregular_verbs"]
+      }
+    },
+    {
+      "day": 14,
+      "topic": "Past Tense",
+      "status": "in_progress",
+      "completed": false,
+      "lesson": {
+        "id": "uuid",
+        "phase": 2,
+        "level": "B1",
+        "theory": "...",
+        "grammar_focus": ["past_simple"],
+        "vocabulary_focus": ["daily_actions"],
+        "exercises_answered": 15,
+        "exercises_total": 30
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 45,
+    "totalPages": 3
   }
 }
 ```

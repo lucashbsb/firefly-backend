@@ -78,27 +78,6 @@ export class AIController {
     res.json({ success: true, data: response });
   }
 
-  async generateReport(req: Request, res: Response): Promise<void> {
-    const { userId } = req.params;
-    const { day, lesson, answers, conversation_history } = req.body;
-
-    const validation = lessonValidation.validateDay(day);
-    if (!validation.isValid || !lesson || !answers) {
-      res.status(400).json({ success: false, error: 'day, lesson, and answers are required' });
-      return;
-    }
-
-    const report = await aiService.generateReport({
-      user_id: userId,
-      day: parseInt(day, 10),
-      lesson,
-      answers,
-      conversation_history
-    });
-
-    res.json({ success: true, data: report });
-  }
-
   async rawCompletion(req: Request, res: Response): Promise<void> {
     const { userId } = req.params;
     const { messages, json_mode } = req.body;

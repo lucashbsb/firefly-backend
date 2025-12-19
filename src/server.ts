@@ -25,11 +25,14 @@ function shutdown(signal: string): void {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-process.on('unhandledRejection', (reason) => {
-  logger.error({ reason }, 'Unhandled promise rejection');
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error({ reason, promise: String(promise) }, 'Unhandled promise rejection - handled gracefully');
 });
 
-process.on('uncaughtException', (err) => {
-  logger.fatal({ err }, 'Uncaught exception');
-  process.exit(1);
+process.on('uncaughtException', (err, origin) => {
+  logger.error({ err, origin }, 'Uncaught exception - handled gracefully');
+});
+
+process.on('warning', (warning) => {
+  logger.warn({ warning: warning.message, stack: warning.stack }, 'Node.js warning');
 });

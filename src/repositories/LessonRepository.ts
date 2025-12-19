@@ -76,6 +76,43 @@ export class LessonRepository extends BaseRepository<Lesson> {
     await this.query('UPDATE lessons SET status = $1 WHERE id = $2', [status, lessonId]);
   }
 
+  async saveCorrections(lessonId: string, corrections: unknown): Promise<void> {
+    await this.query('UPDATE lessons SET corrections = $1 WHERE id = $2', [JSON.stringify(corrections), lessonId]);
+  }
+
+  async saveExercisesData(lessonId: string, exercises: unknown[]): Promise<void> {
+    await this.query('UPDATE lessons SET exercises_data = $1 WHERE id = $2', [JSON.stringify(exercises), lessonId]);
+  }
+
+  async updateExerciseAnswer(lessonId: string, exerciseId: string, answer: string): Promise<void> {
+    await this.query(
+      `UPDATE lessons SET exercises_data = (
+        SELECT jsonb_agg(
+          CASE WHEN elem->>'id' = $2 
+          THEN elem || jsonb_build_object('user_answer', $3)
+          ELSE elem END
+        )
+        FROM jsonb_array_elements(exercises_data) elem
+      ) WHERE id = $1`,
+      [lessonId, exerciseId, answer]
+    );
+  }
+
+  async saveChatMessages(lessonId: string, messages: unknown[]): Promise<void> {
+    await this.query('UPDATE lessons SET chat_messages = $1 WHERE id = $2', [JSON.stringify(messages), lessonId]);
+  }
+
+  async addChatMessage(lessonId: string, message: { role: string; content: string }): Promise<void> {
+    await this.query(
+      `UPDATE lessons SET chat_messages = chat_messages || $1::jsonb WHERE id = $2`,
+      [JSON.stringify(message), lessonId]
+    );
+  }
+
+  async saveReport(lessonId: string, report: unknown): Promise<void> {
+    await this.query('UPDATE lessons SET report = $1 WHERE id = $2', [JSON.stringify(report), lessonId]);
+  }
+
   async incrementExercisesAnswered(lessonId: string): Promise<{ answered: number; total: number }> {
     const result = await this.query<{ exercises_answered: number; exercises_total: number }>(
       `UPDATE lessons SET exercises_answered = exercises_answered + 1 
@@ -108,6 +145,40 @@ export class LessonRepository extends BaseRepository<Lesson> {
       [lessonId]
     );
     return result.rows[0] || null;
+  }
+
+  async findAllByUser(userId: string, limit = 50): Promise<Lesson[]> {
+    const result = await this.query<Lesson>(
+      `SELECT * FROM lessons 
+       WHERE user_id = $1 
+       ORDER BY day DESC 
+       LIMIT $2`,
+      [userId, limit]
+    );
+    return result.rows;
+  }
+
+  async findHistoryByUser(userId: string, page = 1, limit = 20): Promise<{ rows: any[]; total: number }> {
+    const offset = (page - 1) * limit;
+    
+    const [dataResult, countResult] = await Promise.all([
+      this.query<any>(
+        `SELECT * FROM lesson_history_view
+         WHERE user_id = $1 
+         ORDER BY day DESC 
+         LIMIT $2 OFFSET $3`,
+        [userId, limit, offset]
+      ),
+      this.query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM lessons WHERE user_id = $1`,
+        [userId]
+      )
+    ]);
+
+    return {
+      rows: dataResult.rows,
+      total: parseInt(countResult.rows[0].count, 10)
+    };
   }
 }
 

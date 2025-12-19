@@ -1,60 +1,44 @@
 import { aiService } from '../AIService';
-import { 
-  lessonRepository, 
-  exerciseRepository, 
-  answerRepository,
-  LessonStatus
-} from '../../repositories';
-import { CorrectionResponse } from '../../models';
+import { progressService } from '../ProgressService';
+import { lessonRepository, LessonStatus } from '../../repositories';
+import { CorrectionResponse, LessonExercise } from '../../models';
 
 export class LessonExerciseService {
   async answerExercise(
     userId: string,
-    exerciseIndex: number,
-    answer: string
+    exerciseId: string | undefined,
+    answer: string,
+    exerciseIndex?: number
   ): Promise<{ success: boolean; exercises_answered: number; exercises_total: number; all_answered: boolean }> {
     const lesson = await lessonRepository.findActiveByUser(userId);
     if (!lesson) {
       throw new Error('No active lesson. Start a lesson first.');
     }
 
-    if (lesson.status !== 'created' && lesson.status !== 'in_progress') {
+    const allowedStatuses = ['created', 'in_progress', 'exercises_completed', 'corrected'];
+    if (!allowedStatuses.includes(lesson.status)) {
       throw new Error(`Cannot answer exercises in status: ${lesson.status}`);
     }
 
-    const exercises = await exerciseRepository.findByLessonId(lesson.id);
-    const exercise = exercises[exerciseIndex - 1];
+    const exercises = lesson.exercises_data as LessonExercise[] || [];
+    
+    let exercise: LessonExercise | undefined;
+    if (exerciseId) {
+      exercise = exercises.find(e => e.id === exerciseId);
+    } else if (exerciseIndex !== undefined && exerciseIndex >= 0 && exerciseIndex < exercises.length) {
+      exercise = exercises[exerciseIndex];
+    }
     
     if (!exercise) {
-      throw new Error(`Exercise ${exerciseIndex} not found.`);
+      throw new Error(exerciseId ? `Exercise ${exerciseId} not found.` : `Exercise at index ${exerciseIndex} not found.`);
     }
 
-    const existing = await answerRepository.findByUserAndExercise(userId, exercise.id);
-    
-    if (!existing) {
-      await answerRepository.upsert({
-        user_id: userId,
-        exercise_id: exercise.id,
-        lesson_id: lesson.id,
-        answer,
-        is_correct: false,
-        is_partial: false,
-        feedback: null,
-        error_type: null
-      });
+    const isNewAnswer = !exercise.user_answer;
+    exercise.user_answer = answer;
+    await lessonRepository.saveExercisesData(lesson.id, exercises);
 
+    if (isNewAnswer) {
       await lessonRepository.incrementExercisesAnswered(lesson.id);
-    } else {
-      await answerRepository.upsert({
-        user_id: userId,
-        exercise_id: exercise.id,
-        lesson_id: lesson.id,
-        answer,
-        is_correct: existing.is_correct,
-        is_partial: existing.is_partial,
-        feedback: existing.feedback,
-        error_type: existing.error_type
-      });
     }
 
     if (lesson.status === 'created') {
@@ -98,20 +82,15 @@ export class LessonExerciseService {
       throw new Error(`Cannot correct exercises in status: ${lesson.status}. Submit exercises first.`);
     }
 
-    const exercises = await exerciseRepository.findByLessonId(lesson.id);
-    const userAnswers = await answerRepository.findByUserAndExerciseIds(userId, exercises.map(e => e.id));
+    const exercises = lesson.exercises_data as LessonExercise[] || [];
 
-    const exercisesWithAnswers = exercises.map((ex, idx) => {
-      const answer = userAnswers.find(a => a.exercise_id === ex.id);
-      return {
-        id: idx + 1,
-        db_id: ex.id,
-        type: ex.type,
-        question: ex.question,
-        correct_answer: ex.correct_answer || '',
-        student_answer: answer?.answer || ''
-      };
-    }).filter(e => e.student_answer);
+    const exercisesWithAnswers = exercises.map((ex) => ({
+      id: ex.id,
+      type: ex.type,
+      question: ex.question,
+      correct_answer: ex.correct_answer || '',
+      student_answer: ex.user_answer || ''
+    })).filter(e => e.student_answer);
 
     const corrections = await aiService.correctAnswers({
       user_id: userId,
@@ -119,18 +98,39 @@ export class LessonExerciseService {
       exercises: exercisesWithAnswers
     });
 
-    for (const c of corrections.corrections) {
-      const exercise = exercises[c.id - 1];
-      if (!exercise) continue;
+    let correct = 0;
+    let partial = 0;
+    let wrong = 0;
+    const errorBreakdown: Record<string, number> = {};
 
-      await answerRepository.updateCorrection(userId, exercise.id, {
-        is_correct: c.is_correct,
-        is_partial: c.is_partial || false,
-        feedback: c.feedback || null,
-        error_type: c.error_type || null
-      });
+    for (const c of corrections.corrections) {
+      if (c.is_correct) {
+        correct++;
+      } else if (c.is_partial) {
+        partial++;
+      } else {
+        wrong++;
+      }
+      if (!c.is_correct && c.error_type) {
+        errorBreakdown[c.error_type] = (errorBreakdown[c.error_type] || 0) + 1;
+      }
     }
 
+    const total = corrections.corrections.length;
+    const accuracyRate = total > 0 ? Math.round((correct / total) * 100) : 0;
+
+    corrections.summary = {
+      total,
+      correct,
+      partial,
+      wrong,
+      accuracy_rate: accuracyRate,
+      strengths: corrections.summary?.strengths || [],
+      weaknesses: corrections.summary?.weaknesses || [],
+      error_patterns: corrections.summary?.error_patterns || []
+    };
+
+    await lessonRepository.saveCorrections(lesson.id, corrections);
     await lessonRepository.updateStatus(lesson.id, 'corrected');
 
     return corrections;

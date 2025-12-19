@@ -2,7 +2,7 @@ export interface CorrectionRequest {
   user_id: string;
   day: number;
   exercises: Array<{
-    id: number;
+    id: string;
     type: string;
     question: string;
     correct_answer: string;

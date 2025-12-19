@@ -1,20 +1,18 @@
+import crypto from 'crypto';
 import { aiService } from './AIService';
 import { progressService } from './ProgressService';
 import { lessonExerciseService } from './lesson/LessonExerciseService';
 import { lessonChatService } from './lesson/LessonChatService';
 import { 
-  lessonRepository, 
-  exerciseRepository, 
-  reportRepository, 
-  answerRepository,
-  lessonChatRepository,
+  lessonRepository,
+  lessonSummaryRepository,
   LessonStatus
 } from '../repositories';
 import { 
   LessonGenerationResponse, 
   CorrectionResponse, 
-  ReportGenerationResponse, 
-  Exercise 
+  ReportGenerationResponse,
+  LessonExercise
 } from '../models';
 import { getPhaseForDay } from './prompts';
 
@@ -37,8 +35,19 @@ export interface LessonWorkflowState {
 }
 
 export class LessonService {
-  async getWorkflowState(userId: string): Promise<LessonWorkflowState | null> {
-    const lesson = await lessonRepository.findActiveByUser(userId);
+  async getWorkflowState(userId: string, lessonId?: string): Promise<LessonWorkflowState | null> {
+    let lesson;
+    
+    if (lessonId) {
+      lesson = await lessonRepository.findById(lessonId);
+    } else {
+      lesson = await lessonRepository.findActiveByUser(userId);
+      if (!lesson) {
+        const lastCompleted = await lessonRepository.findLastCompletedByUser(userId);
+        if (lastCompleted) lesson = lastCompleted;
+      }
+    }
+    
     if (!lesson) return null;
 
     const progress = await lessonRepository.getProgress(lesson.id);
@@ -98,15 +107,20 @@ export class LessonService {
     const lastCompleted = await lessonRepository.findLastCompletedByUser(userId);
     const nextDay = lastCompleted ? lastCompleted.day + 1 : 1;
 
-    const previousReport = lastCompleted 
-      ? await reportRepository.findByUserAndDay(userId, lastCompleted.day)
-      : null;
+    const previousReport = lastCompleted?.report || null;
 
     const lesson = await aiService.generateLesson({
       user_id: userId,
       day: nextDay,
       previous_report: previousReport as unknown as Record<string, unknown> || undefined
     });
+
+    if (lesson.exercises?.length > 0) {
+      lesson.exercises = lesson.exercises.map(ex => ({
+        ...ex,
+        id: crypto.randomUUID()
+      }));
+    }
 
     await this.saveLessonToDatabase(userId, nextDay, lesson);
 
@@ -141,19 +155,20 @@ export class LessonService {
       exercises_total: lesson.exercises?.length || 30
     });
 
-    await exerciseRepository.deleteByLessonId(lessonId);
-    
     if (lesson.exercises?.length > 0) {
-      await exerciseRepository.createMany(lessonId, lesson.exercises.map(ex => ({
+      const exercisesData = lesson.exercises.map(ex => ({
+        id: ex.id,
         type: ex.type,
         question: ex.question,
         correct_answer: ex.correct_answer,
-        options: ex.options,
-        hint: ex.hint,
-        explanation: ex.explanation,
-        skill_tags: ex.targets_skill ? [ex.targets_skill] : ex.skill_tags,
-        difficulty: ex.difficulty
-      })));
+        options: ex.options || null,
+        hint: ex.hint || null,
+        explanation: ex.explanation || null,
+        skill_tags: ex.targets_skill ? [ex.targets_skill] : (ex.skill_tags || []),
+        difficulty: ex.difficulty || 1,
+        user_answer: null
+      }));
+      await lessonRepository.saveExercisesData(lessonId, exercisesData);
     }
 
     return lessonId;
@@ -161,14 +176,24 @@ export class LessonService {
 
   async answerExercise(
     userId: string,
-    exerciseIndex: number,
-    answer: string
+    exerciseId: string | undefined,
+    answer: string,
+    exerciseIndex?: number
   ): Promise<{ success: boolean; exercises_answered: number; exercises_total: number; all_answered: boolean }> {
-    return lessonExerciseService.answerExercise(userId, exerciseIndex, answer);
+    return lessonExerciseService.answerExercise(userId, exerciseId, answer, exerciseIndex);
   }
 
   async submitExercises(userId: string): Promise<{ success: boolean; message: string }> {
     return lessonExerciseService.submitExercises(userId);
+  }
+
+  async resetLessonFlow(userId: string): Promise<void> {
+    const lesson = await lessonRepository.findActiveByUser(userId);
+    if (!lesson) return;
+
+    if (lesson.status !== 'created' && lesson.status !== 'in_progress') {
+      await lessonRepository.updateStatus(lesson.id, 'in_progress');
+    }
   }
 
   async correctExercises(userId: string): Promise<CorrectionResponse> {
@@ -187,6 +212,114 @@ export class LessonService {
     return lessonChatService.answerChat(userId, message, (u) => this.generateReport(u));
   }
 
+  private preprocessReportData(
+    exercises: any[],
+    correctionsData: any[],
+    chatMessages: any[]
+  ): {
+    answersCompact: string;
+    wrongAnswersDetailed: string;
+    statsPrecomputed: {
+      correct: number;
+      partial: number;
+      wrong: number;
+      blank: number;
+      total: number;
+      accuracyRate: number;
+      performanceScore: number;
+    };
+    skillStats: Record<string, { total: number; correct: number; partial: number; wrong: number }>;
+    typeStats: Record<string, { total: number; correct: number; partial: number; wrong: number }>;
+    difficultyStats: Record<number, { total: number; correct: number }>;
+    errorBreakdown: Record<string, number>;
+    conversationCompact: string;
+  } {
+    const correctionMap = new Map(correctionsData.map(c => [c.exercise_id, c]));
+
+    let correct = 0;
+    let partial = 0;
+    let wrong = 0;
+    let blank = 0;
+    const skillStats: Record<string, { total: number; correct: number; partial: number; wrong: number }> = {};
+    const typeStats: Record<string, { total: number; correct: number; partial: number; wrong: number }> = {};
+    const difficultyStats: Record<number, { total: number; correct: number }> = { 1: { total: 0, correct: 0 }, 2: { total: 0, correct: 0 }, 3: { total: 0, correct: 0 } };
+    const errorBreakdown: Record<string, number> = {};
+    const wrongDetails: string[] = [];
+
+    exercises.forEach((ex, idx) => {
+      const correction = correctionMap.get(ex.id);
+      const answered = ex.user_answer && ex.user_answer.trim() !== '';
+      const isCorrect = correction?.is_correct ?? false;
+      const isPartial = correction?.is_partial ?? false;
+      const errorType = correction?.error_type || null;
+
+      if (!answered) {
+        blank++;
+      } else if (isCorrect) {
+        correct++;
+      } else if (isPartial) {
+        partial++;
+      } else {
+        wrong++;
+      }
+
+      const difficulty = ex.difficulty || 1;
+      difficultyStats[difficulty] = difficultyStats[difficulty] || { total: 0, correct: 0 };
+      difficultyStats[difficulty].total++;
+      if (isCorrect) difficultyStats[difficulty].correct++;
+
+      const type = ex.type || 'unknown';
+      typeStats[type] = typeStats[type] || { total: 0, correct: 0, partial: 0, wrong: 0 };
+      typeStats[type].total++;
+      if (isCorrect) typeStats[type].correct++;
+      else if (isPartial) typeStats[type].partial++;
+      else if (answered) typeStats[type].wrong++;
+
+      (ex.skill_tags || []).forEach((skill: string) => {
+        skillStats[skill] = skillStats[skill] || { total: 0, correct: 0, partial: 0, wrong: 0 };
+        skillStats[skill].total++;
+        if (isCorrect) skillStats[skill].correct++;
+        else if (isPartial) skillStats[skill].partial++;
+        else if (answered) skillStats[skill].wrong++;
+      });
+
+      if (errorType) {
+        errorBreakdown[errorType] = (errorBreakdown[errorType] || 0) + 1;
+      }
+
+      if (!isCorrect && answered) {
+        wrongDetails.push(`#${idx + 1}|${ex.type}|D${difficulty}|Q:"${ex.question}"|A:"${ex.user_answer}"|C:"${ex.correct_answer}"|E:${errorType || 'none'}|F:"${correction?.feedback || ''}"|S:[${(ex.skill_tags || []).join(',')}]`);
+      }
+    });
+
+    const total = exercises.length;
+    const answered = total - blank;
+    const accuracyRate = answered > 0 ? Math.round((correct / answered) * 100) : 0;
+    const performanceScore = total > 0 ? Math.round(((correct + partial * 0.5) / total) * 100) : 0;
+
+    const answersCompact = exercises.map((ex, idx) => {
+      const correction = correctionMap.get(ex.id);
+      const result = !ex.user_answer ? 'BLANK' : correction?.is_correct ? 'OK' : correction?.is_partial ? 'PARTIAL' : 'WRONG';
+      return `${idx + 1}:${result}`;
+    }).join(' ');
+
+    const conversationCompact = chatMessages
+      .filter(m => m.role !== 'system')
+      .map(m => `${m.role === 'user' ? 'S' : 'T'}: ${m.content}`)
+      .join('\n');
+
+    return {
+      answersCompact,
+      wrongAnswersDetailed: wrongDetails.join('\n'),
+      statsPrecomputed: { correct, partial, wrong, blank, total, accuracyRate, performanceScore },
+      skillStats,
+      typeStats,
+      difficultyStats,
+      errorBreakdown,
+      conversationCompact
+    };
+  }
+
   async generateReport(userId: string): Promise<ReportGenerationResponse> {
     const lesson = await lessonRepository.findActiveByUser(userId);
     if (!lesson) {
@@ -197,47 +330,105 @@ export class LessonService {
       throw new Error(`Cannot generate report in status: ${lesson.status}.`);
     }
 
-    const exercises = await exerciseRepository.findByLessonId(lesson.id);
-    const userAnswers = await answerRepository.findByUserAndExerciseIds(userId, exercises.map(e => e.id));
-    const chatMessages = await lessonChatRepository.findByLesson(lesson.id);
+    const exercises = lesson.exercises_data || [];
+    const correctionsData = lesson.corrections?.corrections || [];
+    const chatMessages = lesson.chat_messages || [];
 
-    const answersData = exercises.map((ex) => {
-      const answer = userAnswers.find(a => a.exercise_id === ex.id);
-      return {
-        question: ex.question,
-        student_answer: answer?.answer || '',
-        correct_answer: ex.correct_answer || '',
-        is_correct: answer?.is_correct || false,
-        feedback: answer?.feedback || undefined,
-        error_type: answer?.error_type || undefined
-      };
-    }).filter(a => a.student_answer);
-
-    const lessonData = await this.getLessonData(userId, lesson.id);
+    const preprocessed = this.preprocessReportData(exercises, correctionsData, chatMessages);
 
     const report = await aiService.generateReport({
       user_id: userId,
       day: lesson.day,
-      lesson: lessonData as unknown as Record<string, unknown>,
-      answers: answersData,
-      conversation_history: chatMessages.map(m => ({ role: m.role, content: m.content }))
+      lesson: {
+        topic: lesson.topic,
+        level: lesson.level,
+        grammar_focus: lesson.grammar_focus,
+        vocabulary_focus: lesson.vocabulary_focus
+      } as unknown as Record<string, unknown>,
+      preprocessed
     });
 
-    await progressService.saveReport(userId, lesson.id, lesson.day, {
+    const fullReport = {
       performance_score: report.performance_score,
       accuracy_rate: report.accuracy_rate,
       exercises_correct: report.exercises_correct,
+      exercises_partially_correct: report.exercises_partially_correct || 0,
+      exercises_wrong: report.exercises_wrong || 0,
+      exercises_blank: report.exercises_blank || 0,
       exercises_total: report.exercises_total,
       strengths: report.strengths,
       weaknesses: report.weaknesses,
+      recurring_errors: report.recurring_errors || [],
       error_breakdown: report.error_breakdown,
       skill_scores: report.skill_scores,
+      skill_analysis: report.skill_analysis || [],
+      exercise_type_analysis: report.exercise_type_analysis || [],
+      difficulty_analysis: report.difficulty_analysis || null,
+      conversation_notes: report.conversation_notes || null,
       next_day_focus: report.next_day_focus,
+      homework: report.homework || [],
       perceived_level: report.perceived_level,
       motivational_note: report.motivational_note
+    };
+
+    await lessonRepository.saveReport(lesson.id, fullReport);
+    await lessonRepository.updateStatus(lesson.id, 'completed');
+
+    return report;
+  }
+
+  async regenerateReport(userId: string, day: number): Promise<ReportGenerationResponse> {
+    const lesson = await lessonRepository.findByUserAndDay(userId, day);
+    if (!lesson) {
+      throw new Error(`Lesson for day ${day} not found.`);
+    }
+
+    if (!lesson.corrections) {
+      throw new Error('Cannot regenerate report: lesson has no corrections.');
+    }
+
+    const exercises = lesson.exercises_data || [];
+    const correctionsData = lesson.corrections?.corrections || [];
+    const chatMessages = lesson.chat_messages || [];
+
+    const preprocessed = this.preprocessReportData(exercises, correctionsData, chatMessages);
+
+    const report = await aiService.generateReport({
+      user_id: userId,
+      day: lesson.day,
+      lesson: {
+        topic: lesson.topic,
+        level: lesson.level,
+        grammar_focus: lesson.grammar_focus,
+        vocabulary_focus: lesson.vocabulary_focus
+      } as unknown as Record<string, unknown>,
+      preprocessed
     });
 
-    await lessonRepository.updateStatus(lesson.id, 'completed');
+    const fullReport = {
+      performance_score: report.performance_score,
+      accuracy_rate: report.accuracy_rate,
+      exercises_correct: report.exercises_correct,
+      exercises_partially_correct: report.exercises_partially_correct || 0,
+      exercises_wrong: report.exercises_wrong || 0,
+      exercises_blank: report.exercises_blank || 0,
+      exercises_total: report.exercises_total,
+      strengths: report.strengths,
+      weaknesses: report.weaknesses,
+      recurring_errors: report.recurring_errors || [],
+      error_breakdown: report.error_breakdown,
+      skill_scores: report.skill_scores,
+      skill_analysis: report.skill_analysis || [],
+      exercise_type_analysis: report.exercise_type_analysis || [],
+      difficulty_analysis: report.difficulty_analysis || null,
+      conversation_notes: report.conversation_notes || null,
+      next_day_focus: report.next_day_focus,
+      homework: report.homework || [],
+      perceived_level: report.perceived_level,
+      motivational_note: report.motivational_note
+    };
+
+    await lessonRepository.saveReport(lesson.id, fullReport);
 
     return report;
   }
@@ -248,8 +439,8 @@ export class LessonService {
       throw new Error('Lesson not found.');
     }
 
-    const exercises = await exerciseRepository.findByLessonId(lesson.id);
-    const answers = await this.getAnswersForExercises(userId, exercises);
+    const exercises = lesson.exercises_data || [];
+    const corrections = this.parseCorrections(lesson.corrections);
 
     return {
       day: lesson.day,
@@ -262,23 +453,28 @@ export class LessonService {
       theory: lesson.theory,
       grammar_focus: lesson.grammar_focus || [],
       vocabulary_focus: lesson.vocabulary_focus || [],
-      exercises: exercises.map((ex, idx) => ({
-        id: idx + 1,
-        db_id: ex.id,
-        type: ex.type,
-        instruction: this.getInstructionForType(ex.type),
-        question: ex.question,
-        correct_answer: ex.correct_answer || '',
-        options: ex.options,
-        hint: ex.hint,
-        explanation: ex.explanation,
-        targets_skill: ex.skill_tags?.[0] || '',
-        skill_tags: ex.skill_tags,
-        difficulty: ex.difficulty,
-        user_answer: answers[ex.id]?.answer || null,
-        is_correct: answers[ex.id]?.is_correct ?? null,
-        feedback: answers[ex.id]?.feedback || null
-      })),
+      exercises: exercises.map((ex, idx) => {
+        const correction = corrections[idx + 1];
+        return {
+          id: idx + 1,
+          db_id: ex.id,
+          type: ex.type,
+          instruction: this.getInstructionForType(ex.type),
+          question: ex.question,
+          correct_answer: ex.correct_answer || '',
+          options: ex.options,
+          hint: ex.hint,
+          explanation: ex.explanation,
+          targets_skill: ex.skill_tags?.[0] || '',
+          skill_tags: ex.skill_tags,
+          difficulty: ex.difficulty,
+          user_answer: ex.user_answer || null,
+          is_correct: correction?.is_correct ?? null,
+          is_partial: correction?.is_partial ?? null,
+          feedback: correction?.feedback || null,
+          error_type: correction?.error_type || null
+        };
+      }),
       skills_covered: [...new Set(exercises.flatMap(e => e.skill_tags || []))],
       validation: {
         exercise_count: exercises.length,
@@ -289,11 +485,51 @@ export class LessonService {
     } as LessonGenerationResponse;
   }
 
-  async getSession(userId: string, day: number): Promise<LessonGenerationResponse | null> {
+  async getSession(userId: string, day: number): Promise<{
+    id: string;
+    day: number;
+    phase: number;
+    level: string;
+    topic: string;
+    theory: string | null;
+    grammar_focus: string[] | null;
+    vocabulary_focus: string[] | null;
+    status: LessonStatus;
+    progress: {
+      exercises_answered: number;
+      exercises_total: number;
+      chat_questions_answered: number;
+      chat_questions_total: number;
+    };
+    exercises: unknown[] | null;
+    corrections: unknown;
+    chat_messages: unknown[];
+    report: unknown;
+  } | null> {
     const lesson = await lessonRepository.findByUserAndDay(userId, day);
     if (!lesson) return null;
 
-    return this.getLessonData(userId, lesson.id);
+    return {
+      id: lesson.id,
+      day: lesson.day,
+      phase: lesson.phase,
+      level: lesson.level,
+      topic: lesson.topic,
+      theory: lesson.theory,
+      grammar_focus: lesson.grammar_focus,
+      vocabulary_focus: lesson.vocabulary_focus,
+      status: lesson.status,
+      progress: {
+        exercises_answered: lesson.exercises_answered,
+        exercises_total: lesson.exercises_total,
+        chat_questions_answered: lesson.chat_questions_answered,
+        chat_questions_total: lesson.chat_questions_total
+      },
+      exercises: lesson.exercises_data,
+      corrections: lesson.corrections,
+      chat_messages: lesson.chat_messages || [],
+      report: lesson.report
+    };
   }
 
   private getInstructionForType(type: string): string {
@@ -307,7 +543,7 @@ export class LessonService {
     return instructions[type] || 'Complete the exercise.';
   }
 
-  private getDifficultyDistribution(exercises: Exercise[]): Record<string, number> {
+  private getDifficultyDistribution(exercises: LessonExercise[]): Record<string, number> {
     const dist: Record<string, number> = { '1': 0, '2': 0, '3': 0 };
     exercises.forEach(e => {
       const d = String(e.difficulty || 1);
@@ -316,27 +552,83 @@ export class LessonService {
     return dist;
   }
 
-  private async getAnswersForExercises(
-    userId: string, 
-    exercises: Exercise[]
-  ): Promise<Record<string, { answer: string; is_correct: boolean; feedback: string | null }>> {
-    const exerciseIds = exercises.map(e => e.id);
-    if (exerciseIds.length === 0) return {};
-
-    const answers = await answerRepository.findByUserAndExerciseIds(userId, exerciseIds);
-    const map: Record<string, { answer: string; is_correct: boolean; feedback: string | null }> = {};
+  private parseCorrections(corrections: unknown): Record<number, { is_correct: boolean; is_partial: boolean; feedback: string | null; error_type: string | null }> {
+    if (!corrections) return {};
     
-    answers.forEach(a => {
-      if (a.exercise_id) {
-        map[a.exercise_id] = {
-          answer: a.answer || '',
-          is_correct: a.is_correct,
-          feedback: a.feedback || null
+    const data = typeof corrections === 'string' ? JSON.parse(corrections) : corrections;
+    const map: Record<number, { is_correct: boolean; is_partial: boolean; feedback: string | null; error_type: string | null }> = {};
+    
+    if (data?.corrections && Array.isArray(data.corrections)) {
+      for (const c of data.corrections) {
+        const id = c.id || c.exercise_id;
+        map[id] = {
+          is_correct: c.is_correct,
+          is_partial: c.is_partial || false,
+          feedback: c.feedback || null,
+          error_type: c.error_type || null
         };
       }
-    });
+    }
     
     return map;
+  }
+
+  async getHistory(userId: string, page = 1, limit = 20): Promise<{
+    data: Array<{
+      lesson_id: string;
+      day: number;
+      topic: string;
+      level: string;
+      phase: number;
+      status: string;
+      completed: boolean;
+      exercises_total: number;
+      exercises_answered: number;
+      exercises_correct: number;
+      accuracy_rate: number;
+      performance_score: number;
+      perceived_level: string | null;
+      started_at: string | null;
+      completed_at: string | null;
+    }>;
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+    };
+  }> {
+    const offset = (page - 1) * limit;
+    const summaries = await lessonSummaryRepository.findByUser(userId, limit, offset);
+    const total = await lessonSummaryRepository.countByUser(userId);
+    
+    const data = summaries.map((s) => ({
+      lesson_id: s.lesson_id,
+      day: s.day,
+      topic: s.topic,
+      level: s.level,
+      phase: s.phase,
+      status: s.status,
+      completed: s.status === 'completed',
+      exercises_total: s.exercises_total,
+      exercises_answered: s.exercises_answered,
+      exercises_correct: s.exercises_correct,
+      accuracy_rate: s.accuracy_rate,
+      performance_score: s.performance_score,
+      perceived_level: s.perceived_level,
+      started_at: s.started_at,
+      completed_at: s.completed_at
+    }));
+
+    return {
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    };
   }
 }
 

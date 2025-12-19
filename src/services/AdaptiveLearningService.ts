@@ -1,9 +1,10 @@
-import { userSkillRepository, userStreakRepository } from '../repositories';
-import { lessonContentLogRepository } from '../repositories/LessonContentLogRepository';
-import { userErrorLogRepository } from '../repositories/UserErrorLogRepository';
-import { userLearningMetricsRepository } from '../repositories/UserLearningMetricsRepository';
-import { reportRepository } from '../repositories';
-import { skillRepository } from '../repositories';
+import { 
+  userSkillRepository, 
+  userStreakRepository, 
+  skillRepository,
+  lessonRepository,
+  lessonSummaryRepository
+} from '../repositories';
 import { UserSkill } from '../models/entities';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -88,35 +89,32 @@ export class AdaptiveLearningService {
   async buildLearningContext(userId: string, day: number): Promise<LearningContext> {
     const [
       userSkills,
-      recentErrors,
-      recurringErrors,
-      errorsByType,
-      recentLessons,
-      weeklyMetrics,
-      lastReport,
+      lastLesson,
+      recentSummaries,
       streak
     ] = await Promise.all([
       userSkillRepository.findByUser(userId),
-      userErrorLogRepository.getRecentErrors(userId, 7),
-      userErrorLogRepository.getRecurringErrors(userId, 5),
-      userErrorLogRepository.getErrorsByType(userId),
-      lessonContentLogRepository.findRecentByUser(userId, 5),
-      userLearningMetricsRepository.getWeeklyStats(userId),
-      reportRepository.findByUserAndDay(userId, day - 1),
+      lessonRepository.findByUserAndDay(userId, day - 1),
+      lessonSummaryRepository.getRecentPerformance(userId, 5),
       this.getUserStreak(userId)
     ]);
 
-    const skillsById = new Map(userSkills.map((s: UserSkill) => [s.skill_id, s]));
+    const lastReport = lastLesson?.report || null;
     
-    const mastered = userSkills.filter((s: UserSkill) => s.mastery_level >= 80).map((s: UserSkill) => s.skill_id);
-    const learning = userSkills.filter((s: UserSkill) => s.mastery_level >= 40 && s.mastery_level < 80).map((s: UserSkill) => s.skill_id);
-    const weak = userSkills.filter((s: UserSkill) => s.mastery_level > 0 && s.mastery_level < 40).map((s: UserSkill) => s.skill_id);
+    const getMastery = (s: any) => s.mastery_level ?? s.proficiency ?? 0;
     
-    const allSkillIds = userSkills.map((s: UserSkill) => s.skill_id);
-    const dbSkills = await skillRepository.findByIds(allSkillIds);
+    const mastered = userSkills.filter((s: any) => getMastery(s) >= 80).map((s: any) => s.skill_id);
+    const learning = userSkills.filter((s: any) => getMastery(s) >= 40 && getMastery(s) < 80).map((s: any) => s.skill_id);
+    const weak = userSkills.filter((s: any) => getMastery(s) > 0 && getMastery(s) < 40).map((s: any) => s.skill_id);
+    
+    const allSkillIds = userSkills.map((s: any) => s.skill_id);
+    const dbSkills = allSkillIds.length > 0 ? await skillRepository.findByIds(allSkillIds) : [];
     const dbSkillCodes = dbSkills.map(s => s.code);
 
-    const currentLevel = lastReport?.perceived_level?.overall || 'b1';
+    const perceivedLevel = lastReport?.perceived_level as any;
+    const currentLevel: string = typeof perceivedLevel === 'string' 
+      ? perceivedLevel 
+      : perceivedLevel?.overall || 'b1';
     const curriculumSkills = await this.getAllSkillsUpToLevel(currentLevel);
     
     const notStarted = curriculumSkills
@@ -125,7 +123,9 @@ export class AdaptiveLearningService {
 
     const recommended = this.calculateRecommendedSkills(curriculumSkills, dbSkillCodes, weak, lastReport);
 
-    const accuracyTrend = await this.getAccuracyTrend(userId, 7);
+    const accuracyTrend = await lessonSummaryRepository.getAccuracyTrend(userId, 7);
+
+    const errorPatterns = this.extractErrorPatterns(lastLesson);
 
     return {
       user_id: userId,
@@ -140,23 +140,58 @@ export class AdaptiveLearningService {
         not_started: notStarted.slice(0, 15),
         recommended: recommended.slice(0, 10)
       },
-      error_patterns: {
-        recurring: recurringErrors.slice(0, 5),
-        recent: recentErrors.slice(0, 10),
-        by_type: errorsByType
-      },
-      recent_lessons: recentLessons.map(l => ({
-        day: l.day,
-        skills_taught: l.skills_taught,
-        exercise_count: l.exercise_count,
-        ai_recommendations: l.ai_recommendations
+      error_patterns: errorPatterns,
+      recent_lessons: recentSummaries.map(s => ({
+        day: s.day,
+        topic: s.topic,
+        accuracy_rate: s.accuracy_rate,
+        performance_score: s.performance_score
       })),
       metrics: {
-        weekly: weeklyMetrics,
+        weekly: {
+          lessons_completed: recentSummaries.length,
+          avg_accuracy: recentSummaries.length > 0 
+            ? recentSummaries.reduce((sum, s) => sum + s.accuracy_rate, 0) / recentSummaries.length 
+            : 0
+        },
         accuracy_trend: accuracyTrend,
         streak
       },
       curriculum_skills: curriculumSkills.slice(0, 30)
+    };
+  }
+
+  private extractErrorPatterns(lesson: any): {
+    recurring: any[];
+    recent: any[];
+    by_type: Record<string, number>;
+  } {
+    if (!lesson?.corrections?.corrections) {
+      return { recurring: [], recent: [], by_type: {} };
+    }
+
+    const corrections = lesson.corrections.corrections as any[];
+    const errorsByType: Record<string, number> = {};
+    const recentErrors: any[] = [];
+
+    corrections.forEach(c => {
+      if (!c.is_correct && c.error_type) {
+        errorsByType[c.error_type] = (errorsByType[c.error_type] || 0) + 1;
+        recentErrors.push({
+          error_type: c.error_type,
+          feedback: c.feedback
+        });
+      }
+    });
+
+    const recurring = Object.entries(errorsByType)
+      .filter(([, count]) => count >= 2)
+      .map(([type, count]) => ({ error_type: type, count }));
+
+    return {
+      recurring,
+      recent: recentErrors.slice(0, 10),
+      by_type: errorsByType
     };
   }
 
@@ -191,96 +226,42 @@ export class AdaptiveLearningService {
     return [...new Set([...priority, ...notPracticed])];
   }
 
-  private async getAccuracyTrend(userId: string, days: number): Promise<number[]> {
-    const metrics = await userLearningMetricsRepository.getProgressTrend(userId, days);
-    return metrics.map(m => m.accuracy_rate || 0);
-  }
-
   private async getUserStreak(userId: string): Promise<number> {
     return userStreakRepository.getCurrentStreak(userId);
   }
 
-  async logLessonContent(data: {
-    user_id: string;
-    day: number;
-    skills_taught: string[];
-    skills_practiced: string[];
-    exercise_types: Record<string, number>;
-    theory_topics: string[];
-    vocabulary: string[];
-    grammar: string[];
-    ai_model?: string;
-    ai_provider?: string;
-    tokens?: number;
-    time_ms?: number;
-    recommendations?: any;
-  }): Promise<string> {
-    return lessonContentLogRepository.create({
-      user_id: data.user_id,
-      day: data.day,
-      skills_taught: data.skills_taught,
-      skills_practiced: data.skills_practiced,
-      skills_introduced: data.skills_taught.filter(s => !data.skills_practiced.includes(s)),
-      exercise_types: data.exercise_types,
-      exercise_count: Object.values(data.exercise_types).reduce((a, b) => a + b, 0),
-      theory_topics: data.theory_topics,
-      vocabulary_introduced: data.vocabulary,
-      grammar_focus: data.grammar,
-      ai_model: data.ai_model,
-      ai_provider: data.ai_provider,
-      generation_tokens: data.tokens,
-      generation_time_ms: data.time_ms,
-      ai_recommendations: data.recommendations || {}
-    });
-  }
-
-  async updateMetricsFromAnswers(
+  async updateSkillFromCorrection(
     userId: string,
-    correct: number,
-    partial: number,
-    wrong: number,
-    timeMs?: number
+    skillCode: string,
+    isCorrect: boolean,
+    isPartial: boolean
   ): Promise<void> {
-    const repo = userLearningMetricsRepository;
-    const total = correct + partial + wrong;
+    const skill = await skillRepository.findByCode(skillCode);
+    if (!skill) return;
 
-    await Promise.all([
-      repo.increment(userId, 'exercises_attempted', total),
-      repo.increment(userId, 'exercises_correct', correct),
-      repo.increment(userId, 'exercises_partial', partial),
-      repo.increment(userId, 'exercises_wrong', wrong)
-    ]);
-
-    await repo.updateAccuracy(userId);
-  }
-
-  async logError(data: {
-    user_id: string;
-    day: number;
-    skill_code?: string;
-    exercise_type: string;
-    error_type: string;
-    error_category?: string;
-    user_answer: string;
-    correct_answer: string;
-  }): Promise<void> {
-    let skillId: string | undefined;
+    const userSkill = await userSkillRepository.findByUserAndSkill(userId, skill.id);
     
-    if (data.skill_code) {
-      const skill = await skillRepository.findByCode(data.skill_code);
-      skillId = skill?.id;
+    let masteryDelta = 0;
+    if (isCorrect) {
+      masteryDelta = 5;
+    } else if (isPartial) {
+      masteryDelta = 2;
+    } else {
+      masteryDelta = -3;
     }
 
-    await userErrorLogRepository.logError({
-      user_id: data.user_id,
-      day: data.day,
-      skill_id: skillId,
-      exercise_type: data.exercise_type,
-      error_type: data.error_type,
-      error_category: data.error_category,
-      user_answer: data.user_answer,
-      correct_answer: data.correct_answer
-    });
+    if (userSkill) {
+      const newMastery = Math.max(0, Math.min(100, userSkill.mastery_level + masteryDelta));
+      await userSkillRepository.updateMastery(userId, skill.id, newMastery);
+    } else {
+      await userSkillRepository.create({
+        user_id: userId,
+        skill_id: skill.id,
+        mastery_level: Math.max(0, 50 + masteryDelta),
+        practice_count: 1,
+        correct_count: isCorrect ? 1 : 0
+      });
+    }
   }
 }
 

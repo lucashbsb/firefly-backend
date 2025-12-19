@@ -78,17 +78,7 @@ export class AIService {
     }
   }
 
-  private countExerciseTypes(exercises: any[]): Record<string, number> {
-    const counts: Record<string, number> = {};
-    exercises?.forEach(e => {
-      counts[e.type] = (counts[e.type] || 0) + 1;
-    });
-    return counts;
-  }
-
   async generateLesson(request: LessonGenerationRequest): Promise<LessonGenerationResponse> {
-    const startTime = Date.now();
-
     const [systemPrompt, context] = await Promise.all([
       systemPromptService.getLessonPrompt(),
       adaptiveLearningService.buildLearningContext(request.user_id, request.day)
@@ -105,25 +95,6 @@ export class AIService {
     });
 
     const lesson = this.parseJSON<LessonGenerationResponse>(response.content, 'lesson generation');
-
-    const toArray = (v: string | string[] | undefined): string[] => 
-      Array.isArray(v) ? v : v ? [v] : [];
-
-    await adaptiveLearningService.logLessonContent({
-      user_id: request.user_id,
-      day: request.day,
-      skills_taught: lesson.skills_covered || [],
-      skills_practiced: context.skills_context.learning,
-      exercise_types: this.countExerciseTypes(lesson.exercises),
-      theory_topics: toArray(lesson.grammar_focus),
-      vocabulary: toArray(lesson.vocabulary_focus),
-      grammar: toArray(lesson.grammar_focus),
-      ai_model: response.model,
-      ai_provider: response.provider,
-      tokens: response.usage?.total_tokens,
-      time_ms: Date.now() - startTime,
-      recommendations: lesson.ai_recommendations
-    });
 
     return lesson;
   }
@@ -144,26 +115,6 @@ export class AIService {
     });
 
     const corrections = this.parseJSON<CorrectionResponse>(response.content, 'correction');
-
-    const correct = corrections.corrections?.filter((c: any) => c.is_correct).length || 0;
-    const partial = corrections.corrections?.filter((c: any) => c.is_partial).length || 0;
-    const wrong = corrections.corrections?.filter((c: any) => !c.is_correct && !c.is_partial).length || 0;
-
-    await adaptiveLearningService.updateMetricsFromAnswers(request.user_id, correct, partial, wrong);
-
-    for (const c of corrections.corrections || []) {
-      if (!c.is_correct && c.error_type) {
-        await adaptiveLearningService.logError({
-          user_id: request.user_id,
-          day: 0,
-          exercise_type: c.exercise_type || 'unknown',
-          error_type: c.error_type,
-          error_category: c.error_category || 'unknown',
-          user_answer: c.user_answer || c.student_answer,
-          correct_answer: c.correct_answer
-        });
-      }
-    }
 
     return corrections;
   }
@@ -186,34 +137,182 @@ export class AIService {
   }
 
   async generateReport(request: ReportGenerationRequest): Promise<ReportGenerationResponse> {
-    const [systemPrompt, context] = await Promise.all([
-      systemPromptService.getReportPrompt(),
-      adaptiveLearningService.buildLearningContext(request.user_id, request.day)
-    ]);
+    const systemPrompt = await systemPromptService.getReportPrompt();
+    const lesson = request.lesson as any;
+    const p = request.preprocessed;
+    const stats = p.statsPrecomputed;
 
-    const correct = request.answers.filter(a => a.is_correct).length;
-    const wrong = request.answers.filter(a => !a.is_correct).length;
+    const skillScoresStr = Object.entries(p.skillStats)
+      .map(([skill, data]) => {
+        const acc = data.total > 0 ? Math.round((data.correct / data.total) * 100) : 0;
+        return `${skill}: ${data.correct}/${data.total} (${acc}%)`;
+      })
+      .join('\n');
 
-    const userPrompt = await buildReportUserPrompt(
-      request.day,
-      {
-        topic: (request.lesson as any).topic || 'Unknown',
-        skills_taught: (request.lesson as any).skills_covered || [],
-        exercise_count: request.answers.length
-      },
-      {
-        correct,
-        partial: 0,
-        wrong,
-        details: request.answers.map((a, i) => ({
-          id: i + 1,
-          is_correct: a.is_correct,
-          error_type: a.error_type
-        }))
-      },
-      context,
-      request.conversation_history
-    );
+    const typeStatsStr = Object.entries(p.typeStats)
+      .map(([type, data]) => {
+        const acc = data.total > 0 ? Math.round((data.correct / data.total) * 100) : 0;
+        return `${type}: ${data.correct}/${data.total} (${acc}%)`;
+      })
+      .join('\n');
+
+    const difficultyStr = Object.entries(p.difficultyStats)
+      .map(([d, data]) => {
+        const label = d === '1' ? 'easy' : d === '2' ? 'medium' : 'hard';
+        const acc = data.total > 0 ? Math.round((data.correct / data.total) * 100) : 0;
+        return `${label}: ${data.correct}/${data.total} (${acc}%)`;
+      })
+      .join('\n');
+
+    const errorBreakdownStr = Object.entries(p.errorBreakdown)
+      .map(([type, count]) => `${type}: ${count}`)
+      .join(', ') || 'None';
+
+    const userPrompt = `GENERATE COMPREHENSIVE PROGRESS REPORT FOR DAY ${request.day}
+
+=== LESSON CONTEXT ===
+Topic: ${lesson.topic || 'Unknown'}
+Level: ${lesson.level || 'Unknown'}
+Grammar Focus: ${JSON.stringify(lesson.grammar_focus || [])}
+Vocabulary Focus: ${JSON.stringify(lesson.vocabulary_focus || [])}
+
+=== PERFORMANCE METRICS (PRE-CALCULATED) ===
+Total Exercises: ${stats.total}
+Correct: ${stats.correct}
+Partially Correct: ${stats.partial}
+Wrong: ${stats.wrong}
+Blank/Unanswered: ${stats.blank}
+Accuracy Rate: ${stats.accuracyRate}%
+Performance Score: ${stats.performanceScore}%
+
+=== ANSWERS OVERVIEW ===
+${p.answersCompact}
+
+=== WRONG/PARTIAL ANSWERS (DETAILED) ===
+Format: #N|type|difficulty|Q:"question"|A:"user_answer"|C:"correct_answer"|E:error_type|F:"feedback"|S:[skills]
+${p.wrongAnswersDetailed || 'All answers correct!'}
+
+=== SKILL BREAKDOWN ===
+${skillScoresStr}
+
+=== EXERCISE TYPE BREAKDOWN ===
+${typeStatsStr}
+
+=== DIFFICULTY BREAKDOWN ===
+${difficultyStr}
+
+=== ERROR BREAKDOWN ===
+${errorBreakdownStr}
+
+=== CONVERSATION ===
+${p.conversationCompact || 'No conversation this session'}
+
+=== YOUR TASK ===
+Analyze ALL data above and generate a JSON report with this EXACT structure:
+
+{
+  "performance_score": ${stats.performanceScore},
+  "accuracy_rate": ${stats.accuracyRate},
+  "exercises_correct": ${stats.correct},
+  "exercises_partially_correct": ${stats.partial},
+  "exercises_wrong": ${stats.wrong},
+  "exercises_blank": ${stats.blank},
+  "exercises_total": ${stats.total},
+
+  "strengths": [
+    "Specific strength 1 with evidence (e.g., 'Solid verb to be in present - 100% accuracy')",
+    "..."
+  ],
+  "weaknesses": [
+    "CRITICAL: Specific weakness with examples from wrong answers",
+    "..."
+  ],
+
+  "recurring_errors": [
+    {
+      "error": "Description of recurring error pattern",
+      "occurrences": 2,
+      "exercises": [1, 5],
+      "examples": ["example1", "example2"]
+    }
+  ],
+  "error_breakdown": ${JSON.stringify(p.errorBreakdown)},
+
+  "skill_scores": {
+    "skill_name": 85,
+    ...
+  },
+  "skill_analysis": [
+    {
+      "skill": "skill_name",
+      "total": 5,
+      "correct": 4,
+      "partial": 0,
+      "wrong": 1,
+      "accuracy": 80,
+      "status": "developing",
+      "example_errors": ["error example"]
+    }
+  ],
+
+  "exercise_type_analysis": [
+    {
+      "type": "fill-blank",
+      "total": 10,
+      "correct": 9,
+      "partial": 0,
+      "wrong": 1,
+      "accuracy": 90
+    }
+  ],
+
+  "difficulty_analysis": {
+    "easy": { "total": 10, "correct": 10, "accuracy": 100 },
+    "medium": { "total": 10, "correct": 8, "accuracy": 80 },
+    "hard": { "total": 10, "correct": 6, "accuracy": 60 }
+  },
+
+  "conversation_notes": "Analysis of student's conversational English - grammar usage, vocabulary range, common errors in speech, fluency assessment. If no conversation, null.",
+
+  "next_day_focus": [
+    "Specific skill or topic to focus on tomorrow",
+    "..."
+  ],
+  "homework": [
+    "Write the word 'X' correctly 10 times",
+    "Write 5 sentences practicing Y",
+    "..."
+  ],
+
+  "perceived_level": {
+    "overall": "B1",
+    "overall_description": "Intermediate - description",
+    "skills": {
+      "grammar_knowledge": { "level": "B1", "evidence": "Evidence from exercises" },
+      "grammar_application": { "level": "A2-B1", "evidence": "Evidence" },
+      "vocabulary_recognition": { "level": "B1+", "evidence": "Evidence" },
+      "vocabulary_production": { "level": "A2", "evidence": "Spelling issues" },
+      "writing_accuracy": { "level": "A2", "evidence": "Evidence" },
+      "conversation": { "level": "B1", "evidence": "Evidence from chat" }
+    },
+    "passive_level": "B1+",
+    "active_level": "A2-B1",
+    "gap_analysis": "Analysis of gap between passive (reading/listening) and active (writing/speaking) skills",
+    "prediction": "If student continues daily practice, prediction for improvement timeline"
+  },
+
+  "motivational_note": "Personalized, specific, encouraging but direct. Reference exact scores, specific exercises, concrete improvements needed. No fluff."
+}
+
+CRITICAL RULES:
+1. Every insight MUST trace back to provided data
+2. Reference specific exercise numbers when discussing errors
+3. Identify patterns - same error 2+ times = recurring_error
+4. Strengths = 90%+ accuracy on a skill
+5. Weaknesses = <70% accuracy or repeated errors
+6. Be SPECIFIC - quote actual student answers
+7. homework should be actionable writing exercises
+8. No generic statements`;
 
     const response = await this.complete(request.user_id, {
       messages: [

@@ -2,7 +2,7 @@ import {
   userRepository,
   userSettingsRepository,
   userStreakRepository,
-  lessonProgressRepository
+  lessonSummaryRepository
 } from '../repositories';
 import { User, UserStreak } from '../models/entities';
 import { UserWithDetailsDTO, CreateUserDTO } from '../dto';
@@ -86,36 +86,41 @@ export class UserService {
   }
 
   async getProgress(userId: string): Promise<{ completed_lessons: number; average_score: number; current_day: number }> {
-    const completed = await lessonProgressRepository.countCompleted(userId);
-    const scores = await lessonProgressRepository.getScores(userId);
-    const latestDay = await lessonProgressRepository.getLatestCompletedDay(userId);
-
-    const avgScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+    const completed = await lessonSummaryRepository.countCompletedByUser(userId);
+    const summaries = await lessonSummaryRepository.getRecentPerformance(userId, 100);
+    const avgScore = summaries.length 
+      ? Math.round(summaries.reduce((sum, s) => sum + s.performance_score, 0) / summaries.length) 
+      : 0;
+    const latestDay = summaries.length > 0 ? summaries[0].day : 0;
 
     return { completed_lessons: completed, average_score: avgScore, current_day: latestDay };
   }
 
-  async getHistory(userId: string, limit?: number, offset?: number) {
-    return lessonProgressRepository.getHistory(userId, limit, offset);
+  async getHistory(userId: string, limit = 20, offset = 0) {
+    return lessonSummaryRepository.findByUser(userId, limit, offset);
   }
 
   async getHabitData(userId: string, year: number, month?: number) {
     const streak = await userStreakRepository.findByUserId(userId);
     
-    let startDate: string;
-    let endDate: string;
+    const summaries = await lessonSummaryRepository.findByUser(userId, 365, 0);
+    
+    let startDate: Date;
+    let endDate: Date;
     
     if (month !== undefined) {
-      startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-      const nextMonth = month === 12 ? 1 : month + 1;
-      const nextYear = month === 12 ? year + 1 : year;
-      endDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+      startDate = new Date(year, month - 1, 1);
+      endDate = new Date(year, month, 0);
     } else {
-      startDate = `${year}-01-01`;
-      endDate = `${year + 1}-01-01`;
+      startDate = new Date(year, 0, 1);
+      endDate = new Date(year, 11, 31);
     }
     
-    const completedDates = await lessonProgressRepository.getCompletedDates(userId, startDate, endDate);
+    const completedDates = summaries
+      .filter(s => s.status === 'completed' && s.completed_at)
+      .map(s => new Date(s.completed_at!))
+      .filter(d => d >= startDate && d <= endDate)
+      .map(d => d.toISOString().split('T')[0]);
     
     return {
       streak: {
@@ -123,7 +128,7 @@ export class UserService {
         longest: streak?.longest_streak || 0,
         last_study_date: streak?.last_study_date || null
       },
-      completed_dates: completedDates,
+      completed_dates: [...new Set(completedDates)],
       period: { year, month }
     };
   }

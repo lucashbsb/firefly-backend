@@ -1,5 +1,5 @@
 export interface GeneratedExercise {
-  id: number;
+  id: number | string;
   db_id?: string;
   type: string;
   instruction?: string;
@@ -13,5 +13,7 @@ export interface GeneratedExercise {
   difficulty?: number;
   user_answer?: string | null;
   is_correct?: boolean | null;
+  is_partial?: boolean | null;
   feedback?: string | null;
+  error_type?: string | null;
 }

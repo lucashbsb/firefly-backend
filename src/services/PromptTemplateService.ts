@@ -30,7 +30,7 @@ interface CorrectionPromptContext {
   skillsTaught: string[];
   grammarLevel: string;
   exercises: Array<{
-    id: number;
+    id: string;
     type: string;
     question: string;
     correct_answer: string;

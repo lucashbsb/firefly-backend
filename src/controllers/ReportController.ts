@@ -39,41 +39,6 @@ export class ReportController {
     const history = await progressService.getReportHistory(userId, limit);
     res.json(history);
   }
-
-  async create(req: Request, res: Response): Promise<void> {
-    const { userId } = req.params;
-    const { lesson_id, day, ...reportData } = req.body;
-
-    const validation = reportValidation.validateCreate({ 
-      user_id: userId, 
-      day, 
-      performance_score: reportData.performance_score 
-    });
-    if (!validation.isValid) {
-      res.status(400).json({ errors: validation.toResponse() });
-      return;
-    }
-
-    const id = await progressService.saveReport(userId, lesson_id, day, reportData);
-    res.status(201).json({ id });
-  }
-
-  async updateLessonProgress(req: Request, res: Response): Promise<void> {
-    const { userId, day } = req.params;
-    const { lesson_id, status, score, correct, total } = req.body;
-
-    const id = await progressService.updateLessonProgress(
-      userId,
-      lesson_id,
-      parseInt(day),
-      status,
-      score,
-      correct,
-      total
-    );
-
-    res.json({ id });
-  }
 }
 
 export const reportController = new ReportController();

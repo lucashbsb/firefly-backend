@@ -5,14 +5,10 @@ export { Role } from './Role';
 export { Permission } from './Permission';
 export { UserRole } from './UserRole';
 export { RolePermission } from './RolePermission';
-export { Lesson } from './Lesson';
-export { Exercise } from './Exercise';
-export { UserLessonProgress } from './UserLessonProgress';
-export { UserAnswer } from './UserAnswer';
-export { UserConversation } from './UserConversation';
+export { Lesson, LessonExercise, LessonCorrection, LessonCorrections, LessonChatMessage, LessonReport } from './Lesson';
+export { LessonSummary } from './LessonSummary';
 export { Skill } from './Skill';
 export { UserSkill } from './UserSkill';
-export { DailyReport } from './DailyReport';
 export { PerceivedLevel } from './PerceivedLevel';
 export { SRCard } from './SRCard';
 export { SRCardState } from './SRCardState';
@@ -37,12 +33,4 @@ export { ConversationRequest } from './ConversationRequest';
 export { ConversationResponse } from './ConversationResponse';
 export { ReportGenerationRequest } from './ReportGenerationRequest';
 export { ReportGenerationResponse } from './ReportGenerationResponse';
-export {
-  LessonContentLog,
-  UserLearningMetrics,
-  UserLevelProgression,
-  UserErrorLog,
-  UserCurriculumProgress,
-  UserVocabularyLog,
-  PromptType
-} from './AdaptiveLearning';
+export { PromptType } from './AdaptiveLearning';
