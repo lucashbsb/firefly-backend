@@ -1,17 +1,35 @@
-import "reflect-metadata";
-import app from "./app";
-import env from "./config/env";
-import { initializeDataSource } from "./infrastructure/db/DataSource";
-import logger from "./util/Logger";
+import createApp from './app';
+import { config } from './config';
+import { logger } from './lib/logger';
 
-const start = async () => {
-  await initializeDataSource();
-  app.listen(env.port, () => {
-    logger.info(`Server started successfully on port ${env.port}`);
+const app = createApp();
+
+const server = app.listen(config.port, () => {
+  logger.info({ port: config.port, env: config.nodeEnv }, 'Server started');
+});
+
+function shutdown(signal: string): void {
+  logger.info({ signal }, 'Shutdown requested');
+
+  server.close((err) => {
+    if (err) {
+      logger.error({ err }, 'Error during shutdown');
+      process.exit(1);
+    }
+
+    logger.info('Shutdown complete');
+    process.exit(0);
   });
-};
+}
 
-start().catch(error => {
-  logger.error("Failed to start server", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason }, 'Unhandled promise rejection');
+});
+
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'Uncaught exception');
   process.exit(1);
 });

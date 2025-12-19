@@ -1,23 +1,22 @@
-import { Router } from "express";
-import authRoutes from "./authRoutes.js";
-import cefrLevelRoutes from "./cefrLevelRoutes.js";
-import permissionRoutes from "./permissionRoutes.js";
-import roleRoutes from "./roleRoutes.js";
-import skillCategoryRoutes from "./skillCategoryRoutes.js";
-import skillRoutes from "./skillRoutes.js";
-import skillTrackRoutes from "./skillTrackRoutes.js";
-import studentRoutes from "./studentRoutes.js";
-import userRoutes from "./userRoutes.js";
+import { Router } from 'express';
+import authRoutes from './authRoutes';
+import userRoutes from './userRoutes';
+import skillRoutes from './skillRoutes';
+import reportRoutes from './reportRoutes';
+import srRoutes from './srRoutes';
+import aiRoutes from './aiRoutes';
+import lessonRoutes from './lessonRoutes';
+import metricsRoutes from './metricsRoutes';
 
 const router = Router();
-router.use("/auth", authRoutes);
-router.use("/cefr-levels", cefrLevelRoutes);
-router.use("/permissions", permissionRoutes);
-router.use("/roles", roleRoutes);
-router.use("/skill-categories", skillCategoryRoutes);
-router.use("/skill-tracks", skillTrackRoutes);
-router.use("/skills", skillRoutes);
-router.use("/students", studentRoutes);
-router.use("/users", userRoutes);
+
+router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
+router.use('/skills', skillRoutes);
+router.use('/reports', reportRoutes);
+router.use('/sr', srRoutes);
+router.use('/ai', aiRoutes);
+router.use('/lessons', lessonRoutes);
+router.use('/metrics', metricsRoutes);
 
 export default router;

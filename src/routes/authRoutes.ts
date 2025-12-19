@@ -1,10 +1,13 @@
-import { Router } from "express";
-import AuthController from "../controller/AuthController.js";
-import { loginLimiter, registerLimiter, refreshTokenLimiter } from "../middleware/RateLimitMiddleware.js";
+import { Router } from 'express';
+import { authController } from '../controllers/AuthController';
+import { authenticate } from '../middlewares/auth';
 
 const router = Router();
-router.post("/login", loginLimiter, (req, res, next) => AuthController.login(req, res, next));
-router.post("/register", registerLimiter, (req, res, next) => AuthController.register(req, res, next));
-router.post("/refresh", refreshTokenLimiter, (req, res, next) => AuthController.refresh(req, res, next));
+
+router.post('/register', (req, res) => authController.register(req, res));
+router.post('/login', (req, res) => authController.login(req, res));
+router.post('/logout', (req, res) => authController.logout(req, res));
+router.post('/refresh', (req, res) => authController.refresh(req, res));
+router.get('/me', authenticate, (req, res) => authController.me(req, res));
 
 export default router;

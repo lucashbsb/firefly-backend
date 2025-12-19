@@ -1,0 +1,1 @@
+export { SkillProgressDTO } from './SkillProgressDTO';

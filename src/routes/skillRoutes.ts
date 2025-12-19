@@ -1,13 +1,14 @@
-import { Router } from "express";
-import SkillController from "../controller/SkillController.js";
-import { authenticateToken } from "../middleware/AuthMiddleware.js";
-import { requirePermission } from "../middleware/PermissionMiddleware.js";
-import PermissionCodes from "../security/acl/PermissionCodes.js";
+import { Router } from 'express';
+import { skillController } from '../controllers';
+import { authenticate, requireOwnership } from '../middlewares/auth';
 
 const router = Router();
-router.post("/", authenticateToken, requirePermission(PermissionCodes.SKILLS_CREATE), (req, res, next) => SkillController.create(req, res, next));
-router.get("/", authenticateToken, requirePermission(PermissionCodes.SKILLS_VIEW), (req, res, next) => SkillController.list(req, res, next));
-router.get("/:id", authenticateToken, requirePermission(PermissionCodes.SKILLS_VIEW), (req, res, next) => SkillController.get(req, res, next));
-router.patch("/:id", authenticateToken, requirePermission(PermissionCodes.SKILLS_UPDATE), (req, res, next) => SkillController.update(req, res, next));
+
+router.get('/', authenticate, (req, res) => skillController.getAll(req, res));
+router.get('/user/:userId', authenticate, requireOwnership(), (req, res) => skillController.getUserSkills(req, res));
+router.get('/user/:userId/mastered', authenticate, requireOwnership(), (req, res) => skillController.getMastered(req, res));
+router.get('/user/:userId/weak', authenticate, requireOwnership(), (req, res) => skillController.getWeak(req, res));
+router.get('/user/:userId/categories', authenticate, requireOwnership(), (req, res) => skillController.getByCategory(req, res));
+router.post('/user/:userId/track', authenticate, requireOwnership(), (req, res) => skillController.trackPractice(req, res));
 
 export default router;
